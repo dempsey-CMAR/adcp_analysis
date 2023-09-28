@@ -1,0 +1,441 @@
+---
+title: "Antigonish Current Data"
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, dpi = 600, fig.width=8)
+
+library(adcp)
+library(dplyr)
+library(DT)
+library(gggibbous) 
+library(ggplot2)
+library(here)
+library(leaflet)
+library(lubridate) 
+library(patchwork) 
+library(purrr)  
+library(RColorBrewer)
+library(readr) 
+library(summaryplots) 
+library(tidyr) 
+library(viridis)
+
+source(here("functions/subchunkify.R"))
+source(here("functions/identify_extreme_speed_events.R"))
+
+dt_options <- list(
+  dom = 'ft',
+  paging = FALSE,
+  searching = FALSE,
+  columnDefs = list(list(className = 'dt-center', targets = "_all"))
+)
+
+theme_set(theme_light())
+pal <- brewer.pal(9, "Blues")[5]
+
+depls <- c("AT001", "AT002", "AT003", "AT004")
+
+# import Antigonish Harbour deployments
+dat_all <- adcp_import_data(here("data"), county = "antigonish") %>% 
+  filter(deployment_id %in% depls) %>% 
+  mutate(sea_water_speed_cm_s = sea_water_speed_m_s * 100) %>%
+  select(-c(sea_water_speed_m_s, county, waterbody, bin_depth_below_surface_m))
+
+metadata <- adcp_read_nsdfa_metadata(
+  path = here("supp_data/2023-08-14 - NSDFA Tracking Sheet.xlsx")) %>% 
+  filter(Depl_ID %in% depls) %>% 
+  select(
+    Station = Station_Name, 
+    Latitude = Depl_Lat, 
+    Longitude = Depl_Lon, 
+    `Deployment Date` = Depl_Date, 
+    `Retrieval Date` = Recv_Date, 
+    `Depth (m)` = Inst_Depth, 
+    Bin_Size, First_Bin_Range, Current_Ensemble_Interval_s, Current_Averaging_Interval_s, Current_PingsPerEnsemble
+  )
+
+```
+
+`r Sys.Date()`
+
+# Deployment Locations
+
+```{r}
+leaflet(metadata) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    ~Longitude, ~Latitude, 
+    fillColor = "black", 
+    fillOpacity = 1, 
+    stroke = FALSE, 
+    label = ~Station, 
+    radius = 4,
+    labelOptions = labelOptions(
+      noHide = T, textOnly = TRUE, offset = c(0.9, 11), textsize = "14px")
+  )
+```
+
+# ADCP Deployment Metadata
+
+For all deployments:
+
+- Bin Size: `r unique(metadata$Bin_Size)` m
+- First Bin Range: `r unique(metadata$First_Bin_Range)` m
+- Ensemble Interval: `r unique(metadata$Current_Ensemble_Interval_s)` seconds
+- Averaging Interval: `r unique(metadata$Current_Averaging_Interval_s)` seconds
+- Pings per Ensemble: `r unique(metadata$Current_PingsPerEnsemble)`
+
+
+```{r}
+metadata %>% 
+  select(
+    -c(Bin_Size, First_Bin_Range, 
+       Current_Ensemble_Interval_s,
+       Current_Averaging_Interval_s, 
+       Current_PingsPerEnsemble)
+    ) %>% 
+  datatable(options = dt_options, rownames = FALSE)
+```
+
+# Current Speed Overview
+
+- Current speed over time for each location.
+- Each panel is for one bin; the number in the grey bar indicates the bin height above the sea floor (in metres).
+- Shallowest bins have fewer good observations because of side lobe interference.
+
+## Current Speed at Depth
+
+::: panel-tabset
+```{r}
+#| results: "asis"
+
+for(i in seq_along(depls)){
+  depl_i <- depls[i]
+
+  dat_i <- dat_all %>%
+    filter(deployment_id == depl_i)
+
+  bin_heights <- sort(
+    unique(dat_i$bin_height_above_sea_floor_m), decreasing = TRUE
+  )
+
+  dat_i <- dat_i %>%
+    mutate(
+      bin_height_above_sea_floor_m =
+        ordered(bin_height_above_sea_floor_m, levels = bin_heights)
+    )
+
+  # height of figure j
+  n_bins <- length(bin_heights)
+  h <- n_bins * 1
+
+  cat('\n###', unique(dat_i$station), '\n')
+
+  p <- ggplot(dat_i, aes(timestamp_utc, sea_water_speed_cm_s)) +
+    geom_line(col = pal) +
+    facet_wrap(~bin_height_above_sea_floor_m, ncol = 1) +
+    scale_x_datetime(date_labels = "%Y-%B-%d")
+
+  subchunkify(p, fig_height = h, fig_width = 8.5)
+}
+```
+:::
+
+## Average Current Speed at Depth
+
+Average current speed (+/- 1 standard deviation) for each depth bin.
+
+::: panel-tabset
+```{r}
+#| results: "asis"
+#| message: false
+
+dat_summary <- dat_all %>% 
+  group_by(deployment_id, station, bin_height_above_sea_floor_m) %>% 
+  summarise(
+    mean_sea_water_speed_cm_s = round(mean(sea_water_speed_cm_s), digits = 1),
+    sd_sea_water_speed_cm_s = round(sd(sea_water_speed_cm_s), digits = 1),
+    q_95 = quantile(sea_water_speed_cm_s, probs = 0.95)
+  )
+
+for(i in seq_along(depls)){
+  depl_i <- depls[i]
+  
+  dat_i <- dat_summary %>% 
+    filter(deployment_id == depl_i)
+  
+  bin_heights <- sort(unique(dat_i$bin_height_above_sea_floor_m))
+  
+  dat_i <- dat_i %>% 
+    mutate(
+      bin_height_above_sea_floor_m = 
+        ordered(bin_height_above_sea_floor_m, levels = bin_heights)
+    )
+
+  # height of figure j
+  n_bins <- length(bin_heights)
+  h <- n_bins * 0.4
+
+  cat('\n###', unique(dat_i$station), '\n')
+  
+  p <- ggplot(dat_i,
+         aes(mean_sea_water_speed_cm_s, 
+             bin_height_above_sea_floor_m, 
+             col = mean_sea_water_speed_cm_s)) +
+    geom_point(size = 4) +
+    geom_errorbar(
+      aes(xmin = mean_sea_water_speed_cm_s - sd_sea_water_speed_cm_s, 
+          xmax = mean_sea_water_speed_cm_s + sd_sea_water_speed_cm_s), 
+      width = 0
+    ) +
+    scale_x_continuous("sea_water_speed_cm_s") +
+    theme(
+      text = element_text(size = 12),
+      legend.position = "none"
+    ) 
+  
+  subchunkify(p, fig_height = h, fig_width = 8.5)
+}
+```
+:::
+
+# Near-Bottom Current Speed 
+
+"Near-bottom" is the deepest bin at each station.
+
+Percent of observations in 12 speed categories for the deepest depth bin at each station.
+
+::: panel-tabset
+```{r}
+#| results: "asis"
+#| message: false
+
+dat_bottom <- dat_all %>% 
+  group_by(deployment_id) %>% 
+  mutate(deepest_bin = min(bin_height_above_sea_floor_m)) %>% 
+  filter(bin_height_above_sea_floor_m == deepest_bin) %>% 
+  select(-deepest_bin) %>% 
+  ungroup()
+
+n_ints <- 12
+speed_cols <- viridis(n_ints, option = "F", direction = -1)
+
+for(i in seq_along(depls)){
+  depl_i <- depls[i]
+  
+  dat_i <- dat_bottom %>% 
+    filter(deployment_id == depl_i)
+  
+  ints <- adcp_count_obs(dat_i, sea_water_speed_cm_s)
+  breaks <- c(ints$lower, max(ints$upper))
+  
+  cat('\n###', unique(dat_i$station), '\n')
+  
+  p <- adcp_plot_speed_hist(ints, bar_cols = speed_cols)
+  
+  subchunkify(p, fig_height = 5.5, fig_width = 8.5)
+}
+```
+:::
+
+## Extreme Current Speed
+
+"Extreme values" are defined here as current speeds greater than the 95 th quantile (e.g., top 5 % of current speed observations at each location). 
+
+```{r}
+#| message: false
+
+extreme_current <- dat_bottom %>% 
+  left_join(
+    dat_summary, 
+    by = c("deployment_id", "station", "bin_height_above_sea_floor_m")
+  ) %>%
+  mutate(extreme = sea_water_speed_cm_s > q_95)
+
+extreme_current %>% 
+  filter(extreme) %>% 
+  group_by(deployment_id, station, bin_height_above_sea_floor_m) %>% 
+  summarise(
+    mean_speed_extreme_values_cm_s = round(mean(sea_water_speed_cm_s), digits = 1)
+  ) %>% 
+  ungroup() %>% 
+  select(-deployment_id) %>% 
+  left_join(dat_summary, by = c("station", "bin_height_above_sea_floor_m")) %>% 
+  select(
+    station,
+    `bin_height m` = bin_height_above_sea_floor_m,
+    `mean_speed cm_s` = mean_sea_water_speed_cm_s,
+    q_95,
+    `mean_extreme_speed cm_s`= mean_speed_extreme_values_cm_s
+  ) %>% 
+  mutate(
+    speed_ratio = round(
+      `mean_extreme_speed cm_s` / `mean_speed cm_s`, digits = 2)
+  ) %>% 
+  datatable(options = dt_options, rownames = FALSE)
+
+```
+
+</br>
+
+## Near-Bottom Current Speed Over Time
+
+Sea water speed over time. Shaded grey area indicates extreme values.
+Circles indicate the phase of the moon (yellow circle indicates full moon; black circle indicates new moon). Data from [Moon Phases 2022 – Lunar Calendar for Antigonish, Nova Scotia, Canada](https://www.timeanddate.com/moon/phases/@5886184?year=2022)
+
+::: panel-tabset
+```{r}
+#| results: "asis"
+#| message: false
+
+# data from: https://www.timeanddate.com/moon/phases/@5886184?year=2022
+moon_phase <- read_csv(
+  here("supp_data/2022_antigonish_moon_phases.csv"),
+  show_col_types = FALSE
+) %>% 
+  select(-c(Lunation, Duration)) %>% 
+  pivot_longer(cols = everything(), names_to = "phase", values_to = "date") %>% 
+  mutate(
+    date = paste0(date, "-2022"),
+    date = as_datetime(date, format = "%d-%b-%Y"),
+    percent = case_when(
+      phase == "New Moon" ~ 0,
+      phase == "First Quarter" ~ 0.5,
+      phase ==  "Third Quarter" ~ 0.5,
+      phase == "Full Moon" ~ 1
+    )
+  ) %>% 
+  filter(
+    date >= min(extreme_current$timestamp_utc),
+    date <= max(extreme_current$timestamp_utc)
+  )
+
+for(i in seq_along(depls)){
+  depl_i <- depls[i]
+  
+  dat_i <- extreme_current %>% 
+    filter(deployment_id == depl_i)
+  
+  moon_height <- max(dat_i$sea_water_speed_cm_s) - 
+    0.1 * max(dat_i$sea_water_speed_cm_s)
+  
+  cat('\n###', unique(dat_i$station), '\n')
+  
+  p <- ggplot(dat_i, aes(timestamp_utc, sea_water_speed_cm_s)) +
+    annotate(
+      "rect", fill = "grey80",
+      xmin = as_datetime(-Inf),
+      xmax = as_datetime(Inf),
+      ymin = unique(dat_i$q_95), ymax = Inf
+    ) +
+    geom_line(col = pal, linewidth = 0.5) +
+    geom_moon(
+      data = moon_phase, aes(date, moon_height),
+      ratio = 1, size = 6, fill = "black") +
+    geom_moon(
+      data = moon_phase, aes(date, moon_height, ratio = percent),
+      size = 6, right = FALSE, fill = "gold"
+    ) 
+  
+  subchunkify(p, fig_height = 5.5, fig_width = 8.5)
+}
+  
+```
+:::
+
+## Extreme Current Speed Events
+
+Top panel: duration of extreme current events (e.g., the amount of time when consecutive observations are > 95 th quantile).
+
+Bottom panel: duration of time between extreme current events.
+
+Note the difference in x-axis scale.
+
+::: panel-tabset
+```{r}
+#| results: "asis"
+#| message: false
+
+speed_events <- extreme_current %>% 
+  identify_extreme_speed_events() %>% 
+  mutate(
+    event_duration_hours = difftime(event_end, event_start, units = "hours"),
+    event_duration_hours = as.numeric(event_duration_hours)
+  ) %>% 
+  group_by(station, deployment_id) %>% 
+  mutate(
+    time_between_events_days = difftime(lead(event_start), event_end, units = "days"),
+    time_between_events_days = as.numeric(time_between_events_days)
+  )
+
+for(i in seq_along(depls)){
+  depl_i <- depls[i]
+  
+  dat_i <- speed_events %>% 
+    filter(deployment_id == depl_i)
+  
+  cat('\n###', unique(dat_i$station), '\n')
+ 
+  p1 <- plot_histogram(
+    dat_i, hist_col = "event_duration_hours", pal = pal, binwidth = 0.25
+  ) +
+    scale_x_continuous("Extreme Speed Duration (hours)") +
+    scale_y_continuous("Percent of Events")
+  
+  p2 <- plot_histogram(
+    na.omit(dat_i), 
+    hist_col = "time_between_events_days", 
+    binwidth = 0.25,
+    pal = "#AE1759FF"
+  ) +
+    scale_x_continuous("Time Between Extreme Speed Events (days)") +
+    scale_y_continuous("Percent of Events")
+  
+  p <- p1 / p2
+  
+  subchunkify(p, fig_height = 8, fig_width = 8.5)
+}
+```
+:::
+
+## Current Speed & Direction Over Time
+
+::: panel-tabset
+```{r}
+#| results: "asis"
+#| message: false
+
+for(i in seq_along(depls)){
+  depl_i <- depls[i]
+  
+  dat_i <- extreme_current %>% 
+    filter(deployment_id == depl_i)
+  
+  cat('\n###', unique(dat_i$station), '\n')
+  
+  p <- ggplot(
+    dat_i, 
+    aes(timestamp_utc, sea_water_speed_cm_s, 
+        col = sea_water_to_direction_degree)) +
+    annotate(
+      "rect", fill = "grey80",
+      xmin = as_datetime(-Inf),
+      xmax = as_datetime(Inf),
+      ymin = unique(dat_i$q_95), ymax = Inf
+    ) +
+    geom_line(linewidth = 0.5) +
+    scale_color_viridis("to_direction", direction = -1, option = "C")
+  
+  subchunkify(p, fig_height = 5, fig_width = 8.5)
+}
+```
+
+:::
