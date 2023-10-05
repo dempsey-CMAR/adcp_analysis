@@ -3,5 +3,8 @@
 .RData
 .Ruserdata
 
+supp_data/
 data/
-instructions.PNG
+R/archive/
+R/antigonish_harbour_current.html
+*.PNG
