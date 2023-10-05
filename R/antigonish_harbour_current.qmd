@@ -58,13 +58,46 @@ metadata <- adcp_read_nsdfa_metadata(
     Longitude = Depl_Lon, 
     `Deployment Date` = Depl_Date, 
     `Retrieval Date` = Recv_Date, 
-    `Depth (m)` = Inst_Depth, 
+    `ADCP Height (m)` = Inst_Altitude,
+    `Water Depth (m)` = Inst_Depth, 
+    
     Bin_Size, First_Bin_Range, Current_Ensemble_Interval_s, Current_Averaging_Interval_s, Current_PingsPerEnsemble
+  )
+
+
+# data from: https://www.timeanddate.com/moon/phases/@5886184?year=2022
+moon_phase <- read_csv(
+  here("supp_data/2022_antigonish_moon_phases.csv"),
+  show_col_types = FALSE
+) %>% 
+  na.omit() %>% 
+  select(-c(Lunation, Duration)) %>% 
+  pivot_longer(cols = everything(), names_to = "phase", values_to = "date") %>% 
+  mutate(
+    date = paste0(date, "-2022"),
+    date = as_datetime(date, format = "%d-%b-%Y"),
+    percent = case_when(
+      phase == "New Moon" ~ 0,
+      phase == "First Quarter" ~ 0.5,
+      phase ==  "Third Quarter" ~ 0.5,
+      phase == "Full Moon" ~ 1
+    )
+  ) %>% 
+  filter(
+    date >= min(dat_all$timestamp_utc),
+    date <= max(dat_all$timestamp_utc)
   )
 
 ```
 
 `r Sys.Date()`
+
+Prepared by the [Centre for Marine Applied Research](cmar.ca) (CMAR).
+
+This and other ocean data collected through CMAR's Coastal Monitoring Program is available from the [Nova Scotia Open Data Portal](https://data.novascotia.ca/Fishing-and-Aquaculture/Antigonish-County-Current-Data/mizr-h958).
+
+This document should be considered as a guide only. It was developed for discussion purposes only and should not be used for legal decisions. The information may be revised pending ongoing data analyses.
+
 
 # Deployment Locations
 
@@ -93,7 +126,6 @@ For all deployments:
 - Averaging Interval: `r unique(metadata$Current_Averaging_Interval_s)` seconds
 - Pings per Ensemble: `r unique(metadata$Current_PingsPerEnsemble)`
 
-
 ```{r}
 metadata %>% 
   select(
@@ -104,6 +136,38 @@ metadata %>%
     ) %>% 
   datatable(options = dt_options, rownames = FALSE)
 ```
+
+# Sensor Depth
+
+ADCP sensor depth below the surface over time. Circles indicate the phase of the moon (yellow circle indicates full moon; black circle indicates new moon). Data from [Moon Phases 2022 – Lunar Calendar for Antigonish, Nova Scotia, Canada](https://www.timeanddate.com/moon/phases/@5886184?year=2022).
+
+::: panel-tabset
+```{r}
+#| results: "asis"
+
+for(i in seq_along(depls)){
+  depl_i <- depls[i]
+  
+  dat_i <- dat_all %>%
+    filter(deployment_id == depl_i)
+  
+  moon_height <- max(dat_i$sensor_depth_below_surface_m) 
+  
+  cat('\n###', unique(dat_i$station), '\n')
+  
+  p <- adcp_plot_depth(dat_i, geom = "line")  +
+    geom_moon(
+      data = moon_phase, aes(date, moon_height),
+      ratio = 1, size = 6, fill = "black") +
+    geom_moon(
+      data = moon_phase, aes(date, moon_height, ratio = percent),
+      size = 6, right = moon_phase$phase == "First Quarter", fill = "gold"
+    ) 
+  
+  subchunkify(p, fig_height = 5, fig_width = 8.5)
+}
+```
+:::
 
 # Current Speed Overview
 
@@ -296,28 +360,6 @@ Circles indicate the phase of the moon (yellow circle indicates full moon; black
 #| results: "asis"
 #| message: false
 
-# data from: https://www.timeanddate.com/moon/phases/@5886184?year=2022
-moon_phase <- read_csv(
-  here("supp_data/2022_antigonish_moon_phases.csv"),
-  show_col_types = FALSE
-) %>% 
-  select(-c(Lunation, Duration)) %>% 
-  pivot_longer(cols = everything(), names_to = "phase", values_to = "date") %>% 
-  mutate(
-    date = paste0(date, "-2022"),
-    date = as_datetime(date, format = "%d-%b-%Y"),
-    percent = case_when(
-      phase == "New Moon" ~ 0,
-      phase == "First Quarter" ~ 0.5,
-      phase ==  "Third Quarter" ~ 0.5,
-      phase == "Full Moon" ~ 1
-    )
-  ) %>% 
-  filter(
-    date >= min(extreme_current$timestamp_utc),
-    date <= max(extreme_current$timestamp_utc)
-  )
-
 for(i in seq_along(depls)){
   depl_i <- depls[i]
   
@@ -342,7 +384,7 @@ for(i in seq_along(depls)){
       ratio = 1, size = 6, fill = "black") +
     geom_moon(
       data = moon_phase, aes(date, moon_height, ratio = percent),
-      size = 6, right = FALSE, fill = "gold"
+      size = 6, right = moon_phase$phase == "First Quarter", fill = "gold"
     ) 
   
   subchunkify(p, fig_height = 5.5, fig_width = 8.5)
@@ -406,35 +448,30 @@ for(i in seq_along(depls)){
 ```
 :::
 
-## Current Speed & Direction Over Time
+# Near Bottom Current Speed & Direction
+
+Current rose showing the direction of water flow.
 
 ::: panel-tabset
 ```{r}
 #| results: "asis"
 #| message: false
+#| fig-height: 5.5
 
 for(i in seq_along(depls)){
   depl_i <- depls[i]
   
-  dat_i <- extreme_current %>% 
+  dat_i <- dat_bottom %>% 
     filter(deployment_id == depl_i)
   
   cat('\n###', unique(dat_i$station), '\n')
   
-  p <- ggplot(
-    dat_i, 
-    aes(timestamp_utc, sea_water_speed_cm_s, 
-        col = sea_water_to_direction_degree)) +
-    annotate(
-      "rect", fill = "grey80",
-      xmin = as_datetime(-Inf),
-      xmax = as_datetime(Inf),
-      ymin = unique(dat_i$q_95), ymax = Inf
-    ) +
-    geom_line(linewidth = 0.5) +
-    scale_color_viridis("to_direction", direction = -1, option = "C")
+  ints <- adcp_count_obs(dat_i, sea_water_speed_cm_s)
+  breaks <- c(ints$lower, max(ints$upper))
   
-  subchunkify(p, fig_height = 5, fig_width = 8.5)
+  adcp_plot_current_rose(dat_i, breaks = breaks, speed_cols = speed_cols)
+  
+ # subchunkify(p, fig_height = 5, fig_width = 8.5)
 }
 ```
 
